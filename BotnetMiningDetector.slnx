@@ -1,0 +1,6 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/BotnetMiningDetector.App/BotnetMiningDetector.App.csproj" />
+    <Project Path="src/BotnetMiningDetector.Simulator/BotnetMiningDetector.Simulator.csproj" />
+  </Folder>
+</Solution>

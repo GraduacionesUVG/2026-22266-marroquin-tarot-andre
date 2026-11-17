@@ -1,0 +1,1008 @@
+@implements IDisposable
+@inject MainViewModel Vm
+@inject UiInteractionState Interaction
+
+<div class="shell @(_isSidebarCollapsed ? "sidebar-collapsed" : string.Empty)">
+    @if (_isSidebarCollapsed)
+    {
+        <button type="button"
+                class="sidebar-restore"
+                aria-label="Mostrar menú"
+                aria-expanded="false"
+                title="Mostrar menú"
+                @onclick="ToggleSidebar">
+            <span class="sidebar-toggle-icon" aria-hidden="true"></span>
+        </button>
+    }
+    <aside class="sidebar">
+        <button type="button"
+                class="sidebar-toggle"
+                aria-label="Ocultar menú"
+                aria-expanded="true"
+                title="Ocultar menú"
+                @onclick="ToggleSidebar">
+            <span class="sidebar-toggle-icon" aria-hidden="true"></span>
+        </button>
+        <div class="brand">
+            <div class="brand-mark">BYC</div>
+            <div>
+                <strong>Agente local BYC</strong>
+                <span>Interfaz local</span>
+            </div>
+        </div>
+        <nav>
+            <button type="button" class="@NavClass("dashboard")" data-agent-nav="dashboard" @onclick='() => SelectTab("dashboard")'>Panel</button>
+            <button type="button" class="@NavClass("processes")" data-agent-nav="processes" @onclick='() => SelectTab("processes")'>Procesos</button>
+            <button type="button" class="@NavClass("alerts")" data-agent-nav="alerts" @onclick='() => SelectTab("alerts")'>Alertas</button>
+            <button type="button" class="@NavClass("baseline")" data-agent-nav="baseline" @onclick='() => SelectTab("baseline")'>Línea base</button>
+            <button type="button" class="@NavClass("validation")" data-agent-nav="validation" @onclick='() => SelectTab("validation")'>Validación</button>
+            <button type="button" class="@NavClass("settings")" data-agent-nav="settings" @onclick='() => SelectTab("settings")'>Configuración</button>
+            <button type="button" class="@NavClass("export")" data-agent-nav="export" @onclick='() => SelectTab("export")'>Exportación</button>
+        </nav>
+        <div class="sidebar-footer">
+            <span class="muted">Estado</span>
+            <span class="status-pill @StatusClass(Vm.StatusText)">@Vm.StatusText</span>
+        </div>
+    </aside>
+
+    <main class="content">
+        <header class="topbar">
+            <div>
+                <h1>@PageTitle</h1>
+                <p>@Vm.DetectionReadinessText</p>
+            </div>
+            <div class="actions">
+                <button type="button" class="success-action" data-agent-action="start" @onclick="Vm.StartMonitoringAsync">Iniciar monitoreo</button>
+                <button type="button" class="danger-action" data-agent-action="pause" @onclick="Vm.PauseMonitoringAsync">Pausar</button>
+                <button type="button" class="secondary" data-agent-action="baseline" @onclick="Vm.BuildBaselineAsync">Construir línea base</button>
+            </div>
+        </header>
+
+        <section class="notice">@Vm.ProgressMessage</section>
+
+        @switch (Interaction.ActiveTab)
+        {
+            case "dashboard":
+                @Dashboard()
+                break;
+            case "processes":
+                @Processes()
+                break;
+            case "alerts":
+                @Alerts()
+                break;
+            case "baseline":
+                @Baseline()
+                break;
+            case "validation":
+                @Validation()
+                break;
+            case "settings":
+                @Settings()
+                break;
+            case "export":
+                @Export()
+                break;
+        }
+    </main>
+</div>
+
+@code {
+    private PeriodicTimer? _timer;
+    private CancellationTokenSource? _timerCancellation;
+    private bool _isSidebarCollapsed;
+    private Alert? SelectedAlert => Interaction.SelectedAlertId is long id
+        ? Vm.Alerts.FirstOrDefault(alert => alert.Id == id)
+        : null;
+
+    private string PageTitle => Interaction.ActiveTab switch
+    {
+        "processes" => "Procesos observados",
+        "alerts" => "Alertas",
+        "baseline" => "Línea base",
+        "validation" => "Validación",
+        "settings" => "Configuración",
+        "export" => "Exportación",
+        _ => "Panel"
+    };
+
+    protected override void OnInitialized()
+    {
+        Vm.PropertyChanged += OnViewModelChanged;
+        Interaction.Changed += OnInteractionChanged;
+        _timer = new PeriodicTimer(TimeSpan.FromSeconds(1.5));
+        _timerCancellation = new CancellationTokenSource();
+        _ = RefreshLoopAsync(_timerCancellation.Token);
+    }
+
+    private string NavClass(string tab) => tab == Interaction.ActiveTab ? "nav-link active" : "nav-link";
+
+    private void ToggleSidebar()
+    {
+        _isSidebarCollapsed = !_isSidebarCollapsed;
+    }
+
+    private void SelectTab(string tab)
+    {
+        Interaction.SelectTab(tab);
+        StateHasChanged();
+    }
+
+    private RenderFragment Dashboard() => @<div class="grid">
+        <article class="card metric">
+            <span>CPU total</span>
+            <strong>@Vm.CpuTotalText</strong>
+        </article>
+        <article class="card metric">
+            <span>Memoria</span>
+            <strong>@Vm.MemoryText</strong>
+        </article>
+        <article class="card metric">
+            <span>Procesos</span>
+            <strong>@Vm.ProcessCount</strong>
+        </article>
+        <article class="card metric">
+            <span>Alertas</span>
+            <strong>@Vm.AlertCount</strong>
+        </article>
+        <article class="card wide">
+            <h2>Resumen operativo</h2>
+            @BaselineOverview(true)
+            <dl>
+                <dt>Última alerta</dt>
+                <dd>@Vm.LastAlertText</dd>
+                <dt>Escenario activo</dt>
+                <dd>@Vm.ActiveScenarioText</dd>
+                <dt>Desempeño agente</dt>
+                <dd>@Vm.AgentPerformanceText</dd>
+                <dt>Configuración</dt>
+                <dd>@Vm.SettingsSummary</dd>
+            </dl>
+            <div class="button-row">
+                <button type="button" data-agent-action="clear" @onclick="Vm.ClearExperimentDataAsync">Limpiar resultados</button>
+                <button type="button" class="secondary" data-agent-action="export" @onclick="Vm.ExportAsync">Exportar CSV</button>
+                <button type="button" class="secondary" data-agent-action="refresh" @onclick="Vm.RefreshFromDatabaseAsync">Actualizar</button>
+            </div>
+        </article>
+    </div>;
+
+    private RenderFragment SummaryChip(string label, string value, string? detail = null) => @<div class="summary-chip">
+        <span>@label</span>
+        <strong>@value</strong>
+        @if (!string.IsNullOrWhiteSpace(detail))
+        {
+            <small>@detail</small>
+        }
+    </div>;
+
+    private RenderFragment BaselineOverview(bool compact = false) => @<section class="summary-block">
+        @if (Vm.ActiveBaseline is null)
+        {
+            <p class="muted summary-empty">Sin línea base activa. Construya una línea base para cargar procesos habituales.</p>
+        }
+        else
+        {
+            var baseline = Vm.ActiveBaseline;
+            <div class="summary-grid @(compact ? "compact-summary" : string.Empty)">
+                @SummaryChip("Procesos habituales", Vm.ProcessBaselines.Count.ToString(), "Aprendidos en la línea base")
+                @SummaryChip("Creada", baseline.CreatedAt.ToString("g"))
+                @SummaryChip("CPU media", $"{baseline.CpuAverage:N2}% +/- {baseline.CpuStdDev:N2}")
+                @SummaryChip("RAM media", $"{baseline.MemoryAverage:N2}% +/- {baseline.MemoryStdDev:N2}")
+                @if (!compact)
+                {
+                    @SummaryChip("CPU rango", $"{baseline.CpuMin:N2}% a {baseline.CpuMax:N2}%")
+                    @SummaryChip("RAM rango", $"{baseline.MemoryMin:N2}% a {baseline.MemoryMax:N2}%")
+                    @SummaryChip("TCP medio", baseline.NetworkConnectionAverage.ToString("N2"))
+                    @SummaryChip("Cobertura de muestreo", BaselineCoverageText(baseline), BaselineSampleCountText(baseline))
+                    @SummaryChip("Brecha máxima", BaselineGapText(baseline), "Continuidad de la construcción")
+                }
+            </div>
+            <p class="baseline-note @(compact ? "compact-note" : string.Empty)">
+                @Vm.BaselineProcessExplanation; se usa como referencia para comparar el monitoreo.
+            </p>
+        }
+    </section>;
+
+    private RenderFragment EvaluationOverview() => @<section class="summary-block">
+        @if (Vm.EvaluationSummary is null)
+        {
+            <p class="muted summary-empty">@Vm.EvaluationSummaryText</p>
+        }
+        else
+        {
+            var summary = Vm.EvaluationSummary;
+            <div class="summary-grid evaluation-summary">
+                @SummaryChip("TP", summary.TruePositives.ToString(), "Sospechosos detectados")
+                @SummaryChip("FP", summary.FalsePositives.ToString(), "Legítimos marcados como alerta")
+                @SummaryChip("FN", summary.FalseNegatives.ToString(), "Sospechosos no detectados")
+                @SummaryChip("TN", summary.TrueNegatives.ToString(), "Legítimos sin alerta")
+                @SummaryChip("Precisión", $"{summary.Precision:P1}", "Alertas positivas correctas")
+                @SummaryChip("Sensibilidad / Recall", $"{summary.Recall:P1}", "Sospechosos detectados")
+                @SummaryChip("Tasa FP", $"{summary.FalsePositiveRate:P1}", "Falsas alertas sobre casos legítimos")
+                @SummaryChip("Tiempo medio", $"{summary.AverageDetectionTimeSeconds:N1}s")
+                @SummaryChip("Agente CPU", $"{summary.AgentAverageCpuPercent:N2}%")
+                @SummaryChip("Agente RAM", $"{summary.AgentAverageMemoryMb:N1} MB")
+                @SummaryChip("Agente RAM máxima", $"{summary.AgentMaximumMemoryMb:N1} MB")
+                @SummaryChip("Cobertura línea base", $"{summary.BaselineCoverage:P1}")
+                @SummaryChip("Claridad alertas", $"{summary.AlertClarityScore:P1}")
+                @SummaryChip("Estadísticas", summary.StatisticalActivationCount.ToString(), "Comparaciones con línea base")
+                @SummaryChip("Absolutas", summary.AbsoluteActivationCount.ToString(), "Umbrales fijos de laboratorio")
+                @SummaryChip("Heurísticas", summary.HeuristicActivationCount.ToString(), "Reglas de comportamiento")
+                @SummaryChip("Correlación", summary.CorrelationActivationCount.ToString(), "Coincidencia de varias señales")
+            </div>
+        }
+    </section>;
+
+    private RenderFragment Processes() => @<article class="card">
+        <div class="section-head">
+            <h2>Procesos activos</h2>
+            <span class="muted">@FilteredProcesses.Count() visibles de @Vm.CurrentProcesses.Count</span>
+        </div>
+        <div class="table-tools">
+            @FilterInput("process-search", "Buscar por PID, nombre o ruta")
+            @SelectFilter("process-known", "Tipo", new[] { ("", "Todos"), ("known", "Habituales"), ("unknown", "No habituales") })
+            <div class="column-tools">
+                @ColumnToggle("process-pid", "PID")
+                @ColumnToggle("process-name", "Nombre")
+                @ColumnToggle("process-cpu", "CPU")
+                @ColumnToggle("process-memory", "Memoria")
+                @ColumnToggle("process-life", "Vida")
+                @ColumnToggle("process-network", "TCP")
+                @ColumnToggle("process-known", "Habitual")
+                @ColumnToggle("process-time", "Observación")
+                @ColumnToggle("process-path", "Ruta")
+            </div>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        @if (Column("process-pid")) { @SortHeader("processes", "pid", "PID") }
+                        @if (Column("process-name")) { @SortHeader("processes", "name", "Nombre") }
+                        @if (Column("process-cpu")) { @SortHeader("processes", "cpu", "CPU") }
+                        @if (Column("process-memory")) { @SortHeader("processes", "memory", "Memoria") }
+                        @if (Column("process-life")) { @SortHeader("processes", "life", "Vida") }
+                        @if (Column("process-network")) { @SortHeader("processes", "network", "TCP") }
+                        @if (Column("process-known")) { @SortHeader("processes", "known", "Habitual") }
+                        @if (Column("process-time")) { @SortHeader("processes", "time", "Última observación") }
+                        @if (Column("process-path")) { @SortHeader("processes", "path", "Ruta") }
+                    </tr>
+                </thead>
+                <tbody>
+                @foreach (var process in FilteredProcesses.Take(250))
+                {
+                    <tr>
+                        @if (Column("process-pid")) { <td>@process.ProcessId</td> }
+                        @if (Column("process-name")) { <td>@process.ProcessName</td> }
+                        @if (Column("process-cpu")) { <td>@FormatPercent(process.CpuPercent)</td> }
+                        @if (Column("process-memory")) { <td>@FormatMb(process.MemoryMb)</td> }
+                        @if (Column("process-life")) { <td>@FormatSeconds(process.LifetimeSeconds)</td> }
+                        @if (Column("process-network")) { <td>@process.NetworkConnectionCount</td> }
+                        @if (Column("process-known")) { <td><span class="badge @(process.IsKnownProcess ? "ok" : "danger")">@(process.IsKnownProcess ? "Habitual" : "No habitual")</span></td> }
+                        @if (Column("process-time")) { <td>@process.Timestamp.ToString("g")</td> }
+                        @if (Column("process-path")) { <td class="path">@process.ExecutablePath</td> }
+                    </tr>
+                }
+                </tbody>
+            </table>
+        </div>
+    </article>;
+
+    private RenderFragment Alerts() => @<div class="split">
+        <article class="card">
+            <div class="section-head">
+                <h2>Alertas generadas</h2>
+                <span class="muted">@FilteredAlerts.Count() visibles de @Vm.AlertCount total</span>
+            </div>
+            <div class="table-tools">
+                @FilterInput("alert-search", "Buscar por proceso, regla o descripción")
+                @SelectFilter("alert-severity", "Severidad", new[] { ("", "Todas"), ("Alta", "Alta"), ("Media", "Media"), ("Baja", "Baja") })
+                @SelectFilter("alert-status", "Estado", new[] { ("", "Todas"), ("pending", "Pendientes"), ("ack", "Revisadas") })
+                <div class="column-tools">
+                    @ColumnToggle("alert-select", "Selección")
+                    @ColumnToggle("alert-date", "Fecha")
+                    @ColumnToggle("alert-severity", "Severidad")
+                    @ColumnToggle("alert-type", "Tipo")
+                    @ColumnToggle("alert-rule", "Regla")
+                    @ColumnToggle("alert-category", "Categoría")
+                    @ColumnToggle("alert-process", "Proceso")
+                    @ColumnToggle("alert-status", "Estado")
+                </div>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            @if (Column("alert-select")) { <th>Selección</th> }
+                            @if (Column("alert-date")) { @SortHeader("alerts", "date", "Fecha") }
+                            @if (Column("alert-severity")) { @SortHeader("alerts", "severity", "Severidad") }
+                            @if (Column("alert-type")) { @SortHeader("alerts", "type", "Tipo") }
+                            @if (Column("alert-rule")) { @SortHeader("alerts", "rule", "Regla") }
+                            @if (Column("alert-category")) { @SortHeader("alerts", "category", "Categoría") }
+                            @if (Column("alert-process")) { @SortHeader("alerts", "process", "Proceso") }
+                            @if (Column("alert-status")) { @SortHeader("alerts", "status", "Estado") }
+                        </tr>
+                    </thead>
+                    <tbody>
+                    @foreach (var alert in FilteredAlerts)
+                    {
+                        <tr class="@(Interaction.SelectedAlertId == alert.Id ? "selected-row" : "")">
+                            @if (Column("alert-select")) { <td><button type="button" class="compact" data-agent-alert="@alert.Id" @onclick="() => Interaction.SelectAlert(alert.Id)">Ver detalle</button></td> }
+                            @if (Column("alert-date")) { <td>@alert.Timestamp.ToString("g")</td> }
+                            @if (Column("alert-severity")) { <td><span class="badge @SeverityClass(alert.Severity)">@alert.Severity</span></td> }
+                            @if (Column("alert-type")) { <td>@alert.AlertType</td> }
+                            @if (Column("alert-rule")) { <td>@alert.RuleName</td> }
+                            @if (Column("alert-category")) { <td>@RuleCategoryLabel(alert.RuleCategory)</td> }
+                            @if (Column("alert-process")) { <td>@alert.ProcessName</td> }
+                            @if (Column("alert-status")) { <td>@(alert.WasAcknowledged ? "Revisada" : "Pendiente")</td> }
+                        </tr>
+                    }
+                    </tbody>
+                </table>
+            </div>
+        </article>
+
+        <article class="card detail">
+            @if (SelectedAlert is null)
+            {
+                <h2>Detalle de alerta</h2>
+                <p class="muted">Use el botón <strong>Ver detalle</strong> en la primera columna de la tabla para seleccionar una alerta.</p>
+            }
+            else
+            {
+                var selectedAlert = SelectedAlert!;
+                <h2>Alerta #@selectedAlert.Id</h2>
+                <p><strong>@selectedAlert.AlertType</strong> - @selectedAlert.ProcessName</p>
+                <p>@selectedAlert.Description</p>
+                <p class="alert-explain">@AlertMethodologyExplanation(selectedAlert)</p>
+                <dl>
+                    <dt>Regla activada</dt><dd>@selectedAlert.RuleName</dd>
+                    <dt>Categoría</dt><dd>@RuleCategoryLabel(selectedAlert.RuleCategory)</dd>
+                    <dt>Métrica observada</dt><dd>@selectedAlert.MetricObserved</dd>
+                    <dt>Referencia usada</dt><dd>@selectedAlert.BaselineReference</dd>
+                    <dt>Valor observado</dt><dd>@AlertNumber(selectedAlert, selectedAlert.ObservedValue)</dd>
+                    <dt>Promedio base</dt><dd>@AlertNumber(selectedAlert, selectedAlert.BaselineAverage)</dd>
+                    <dt>Desviación estándar</dt><dd>@AlertNumber(selectedAlert, selectedAlert.BaselineStdDev)</dd>
+                    <dt>Multiplicador</dt><dd>@AlertNumber(selectedAlert, selectedAlert.StdDevMultiplier)</dd>
+                    <dt>Umbral calculado</dt><dd>@AlertNumber(selectedAlert, selectedAlert.CalculatedThreshold)</dd>
+                    <dt>Umbral absoluto</dt><dd>@AlertNumber(selectedAlert, selectedAlert.AbsoluteThreshold)</dd>
+                    <dt>Tipo de activación</dt><dd>@ThresholdTypeLabel(selectedAlert.ThresholdType)</dd>
+                    <dt>Duración sostenida</dt><dd>@FormatSeconds(selectedAlert.SustainedDurationSeconds)</dd>
+                    <dt>Evidencia técnica</dt><dd>@AlertEvidence(selectedAlert)</dd>
+                    <dt>Recomendación</dt><dd>@selectedAlert.Recommendation</dd>
+                </dl>
+                <button type="button" data-agent-action="ack-alert" data-agent-alert-id="@selectedAlert.Id" @onclick="() => Vm.AcknowledgeAlertAsync(selectedAlert)">Marcar revisada</button>
+            }
+        </article>
+    </div>;
+
+    private RenderFragment Baseline() => @<article class="card">
+        <div class="section-head">
+            <div>
+                <h2>Línea base activa</h2>
+            </div>
+            <button type="button" data-agent-action="baseline" @onclick="Vm.BuildBaselineAsync">Reconstruir línea base</button>
+        </div>
+        @BaselineOverview()
+        <div class="table-tools">
+            @FilterInput("baseline-search", "Buscar proceso base")
+            <div class="column-tools">
+                @ColumnToggle("baseline-process", "Proceso")
+                @ColumnToggle("baseline-cpu-avg", "CPU media")
+                @ColumnToggle("baseline-cpu-dev", "CPU desv.")
+                @ColumnToggle("baseline-mem-avg", "Memoria media")
+                @ColumnToggle("baseline-mem-dev", "Memoria desv.")
+                @ColumnToggle("baseline-tcp-avg", "TCP media")
+                @ColumnToggle("baseline-tcp-dev", "TCP desv.")
+                @ColumnToggle("baseline-life", "Vida")
+                @ColumnToggle("baseline-count", "Ocurrencias")
+            </div>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        @if (Column("baseline-process")) { @SortHeader("baseline", "process", "Proceso") }
+                        @if (Column("baseline-cpu-avg")) { @SortHeader("baseline", "cpuAvg", "CPU media") }
+                        @if (Column("baseline-cpu-dev")) { @SortHeader("baseline", "cpuDev", "CPU desv.") }
+                        @if (Column("baseline-mem-avg")) { @SortHeader("baseline", "memoryAvg", "Memoria media") }
+                        @if (Column("baseline-mem-dev")) { @SortHeader("baseline", "memoryDev", "Memoria desv.") }
+                        @if (Column("baseline-tcp-avg")) { @SortHeader("baseline", "tcpAvg", "TCP media") }
+                        @if (Column("baseline-tcp-dev")) { @SortHeader("baseline", "tcpDev", "TCP desv.") }
+                        @if (Column("baseline-life")) { @SortHeader("baseline", "life", "Vida típica") }
+                        @if (Column("baseline-count")) { @SortHeader("baseline", "count", "Ocurrencias") }
+                    </tr>
+                </thead>
+                <tbody>
+                @foreach (var item in FilteredBaselines)
+                {
+                    <tr>
+                        @if (Column("baseline-process")) { <td>@item.ProcessName</td> }
+                        @if (Column("baseline-cpu-avg")) { <td>@FormatPercent(item.AverageCpu)</td> }
+                        @if (Column("baseline-cpu-dev")) { <td>@FormatPercent(item.StdDevCpu)</td> }
+                        @if (Column("baseline-mem-avg")) { <td>@FormatMb(item.AverageMemory)</td> }
+                        @if (Column("baseline-mem-dev")) { <td>@FormatMb(item.StdDevMemory)</td> }
+                        @if (Column("baseline-tcp-avg")) { <td>@FormatNullable(item.AverageNetworkConnections)</td> }
+                        @if (Column("baseline-tcp-dev")) { <td>@FormatNullable(item.StdDevNetworkConnections)</td> }
+                        @if (Column("baseline-life")) { <td>@FormatSeconds(item.TypicalLifetimeSeconds)</td> }
+                        @if (Column("baseline-count")) { <td>@item.OccurrenceCount</td> }
+                    </tr>
+                }
+                </tbody>
+            </table>
+        </div>
+    </article>;
+
+    private RenderFragment Validation() => @<div class="grid validation-grid">
+        <article class="card wide">
+            <h2>Simulaciones seguras</h2>
+            <p class="muted">Solo reproducen comportamientos observables. No hay malware, minería real ni infraestructura externa.</p>
+            <div class="button-row">
+                <button type="button" data-agent-scenario="UsoNormal" @onclick='() => Vm.RunScenarioAsync("UsoNormal")'>Uso normal</button>
+                <button type="button" data-agent-scenario="CargaLegitimaTemporal" @onclick='() => Vm.RunScenarioAsync("CargaLegitimaTemporal")'>Carga legítima temporal</button>
+                <button type="button" data-agent-scenario="CriptomineriaSimulada" @onclick='() => Vm.RunScenarioAsync("CriptomineriaSimulada")'>Criptominería simulada</button>
+                <button type="button" data-agent-scenario="BotnetSimulada" @onclick='() => Vm.RunScenarioAsync("BotnetSimulada")'>Botnet simulada</button>
+                <button type="button" data-agent-scenario="ProcesoPersistenteSimulado" @onclick='() => Vm.RunScenarioAsync("ProcesoPersistenteSimulado")'>Proceso persistente</button>
+                <button type="button" data-agent-scenario="RutaSospechosaSimulada" @onclick='() => Vm.RunScenarioAsync("RutaSospechosaSimulada")'>Nombre o ruta sospechosa</button>
+                <button type="button" data-agent-scenario="Combinado" @onclick='() => Vm.RunScenarioAsync("Combinado")'>Escenario combinado</button>
+                <button type="button" class="danger-action" data-agent-action="stop-simulation" @onclick="Vm.StopSimulationAsync">Detener simulación</button>
+            </div>
+            <strong>@Vm.ActiveScenarioText</strong>
+        </article>
+        <article class="card wide">
+            <h2>Métricas de evaluación</h2>
+            @EvaluationOverview()
+        </article>
+        <article class="card wide">
+            <div class="section-head">
+                <h2>Escenarios registrados</h2>
+                <span class="muted">@FilteredScenarios.Count() visibles de @Vm.ValidationScenarios.Count</span>
+            </div>
+            <div class="table-tools">
+                @FilterInput("scenario-search", "Buscar escenario, resultado o notas")
+                <div class="column-tools">
+                    @ColumnToggle("scenario-start", "Inicio")
+                    @ColumnToggle("scenario-end", "Fin")
+                    @ColumnToggle("scenario-name", "Escenario")
+                    @ColumnToggle("scenario-category", "Tipo")
+                    @ColumnToggle("scenario-description", "Descripción")
+                    @ColumnToggle("scenario-process", "Proceso")
+                    @ColumnToggle("scenario-duration", "Duración")
+                    @ColumnToggle("scenario-expected", "Esperado")
+                    @ColumnToggle("scenario-result", "Obtenido")
+                    @ColumnToggle("scenario-classification", "Clasificación")
+                    @ColumnToggle("scenario-confusion", "Resultado")
+                    @ColumnToggle("scenario-alert", "Alerta")
+                    @ColumnToggle("scenario-time", "Tiempo")
+                    @ColumnToggle("scenario-notes", "Observaciones")
+                </div>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            @if (Column("scenario-start")) { @SortHeader("scenarios", "start", "Inicio") }
+                            @if (Column("scenario-end")) { @SortHeader("scenarios", "end", "Fin") }
+                            @if (Column("scenario-name")) { @SortHeader("scenarios", "name", "Escenario") }
+                            @if (Column("scenario-category")) { @SortHeader("scenarios", "category", "Tipo") }
+                            @if (Column("scenario-description")) { @SortHeader("scenarios", "description", "Descripción") }
+                            @if (Column("scenario-process")) { @SortHeader("scenarios", "process", "Proceso") }
+                            @if (Column("scenario-duration")) { @SortHeader("scenarios", "duration", "Duración") }
+                            @if (Column("scenario-expected")) { @SortHeader("scenarios", "expected", "Esperado") }
+                            @if (Column("scenario-result")) { @SortHeader("scenarios", "actual", "Obtenido") }
+                            @if (Column("scenario-classification")) { @SortHeader("scenarios", "classification", "Clasificación") }
+                            @if (Column("scenario-confusion")) { @SortHeader("scenarios", "confusion", "Resultado") }
+                            @if (Column("scenario-alert")) { @SortHeader("scenarios", "alert", "Alerta") }
+                            @if (Column("scenario-time")) { @SortHeader("scenarios", "time", "Tiempo") }
+                            @if (Column("scenario-notes")) { @SortHeader("scenarios", "notes", "Observaciones") }
+                        </tr>
+                    </thead>
+                    <tbody>
+                    @foreach (var scenario in FilteredScenarios)
+                    {
+                        <tr>
+                            @if (Column("scenario-start")) { <td>@scenario.StartedAt.ToString("g")</td> }
+                            @if (Column("scenario-end")) { <td>@(scenario.FinishedAt?.ToString("g") ?? "En ejecución")</td> }
+                            @if (Column("scenario-name")) { <td>@scenario.Name</td> }
+                            @if (Column("scenario-category")) { <td>@scenario.ScenarioCategory</td> }
+                            @if (Column("scenario-description")) { <td>@scenario.Description</td> }
+                            @if (Column("scenario-process"))
+                            {
+                                <td>
+                                    <div>@scenario.ProcessName</div>
+                                    @if (scenario.ProcessId is not null) { <small class="muted">PID @scenario.ProcessId</small> }
+                                </td>
+                            }
+                            @if (Column("scenario-duration")) { <td>@FormatSeconds(scenario.DurationSeconds)</td> }
+                            @if (Column("scenario-expected")) { <td>@scenario.ExpectedResult</td> }
+                            @if (Column("scenario-result")) { <td>@scenario.ActualResult</td> }
+                            @if (Column("scenario-classification")) { <td>@scenario.ActualClassification</td> }
+                            @if (Column("scenario-confusion")) { <td>@scenario.ConfusionResult</td> }
+                            @if (Column("scenario-alert")) { <td>@(scenario.AlertGenerated ? "Sí" : "No")</td> }
+                            @if (Column("scenario-time")) { <td>@FormatSeconds(scenario.DetectionTimeSeconds)</td> }
+                            @if (Column("scenario-notes"))
+                            {
+                                <td>
+                                    <div>@scenario.Notes</div>
+                                    @if (scenario.TelemetrySampleCount > 0) { <small class="muted">@ScenarioTelemetrySummary(scenario)</small> }
+                                </td>
+                            }
+                        </tr>
+                    }
+                    </tbody>
+                </table>
+            </div>
+        </article>
+    </div>;
+
+    private RenderFragment Settings() => @<article class="card settings-card">
+        <div class="section-head">
+            <div>
+                <h2>Configuración efectiva</h2>
+                <p>Esta sección es de solo lectura. Los criterios estadísticos se derivan de la línea base activa y cambian cuando la reconstruyes.</p>
+            </div>
+            <span class="badge @(Vm.ActiveBaseline is null ? "danger" : "ok")">@(Vm.ActiveBaseline is null ? "Sin línea base" : "Derivada de línea base")</span>
+        </div>
+
+        @if (Vm.ActiveBaseline is null)
+        {
+            <section class="notice">Construye una línea base para ver los umbrales efectivos del equipo.</section>
+        }
+        else
+        {
+            var baseline = Vm.ActiveBaseline;
+            <h2 class="subhead">Criterios derivados de línea base</h2>
+            <div class="settings-grid">
+                @ReadOnlyMetric("Creada", baseline.CreatedAt.ToString("g"))
+                @ReadOnlyMetric("Duración aprendizaje", $"{baseline.LearningDurationMinutes} min")
+                @ReadOnlyMetric("Cobertura de muestreo", $"{BaselineCoverageText(baseline)} ({BaselineSampleCountText(baseline)})")
+                @ReadOnlyMetric("Brecha máxima de muestras", BaselineGapText(baseline))
+                @ReadOnlyMetric("CPU media sistema", FormatPercent(baseline.CpuAverage))
+                @ReadOnlyMetric("CPU desviación", FormatPercent(baseline.CpuStdDev))
+                @ReadOnlyMetric("CPU rango típico", $"{FormatPercent(baseline.CpuMin)} a {FormatPercent(baseline.CpuMax)}")
+                @ReadOnlyMetric("Umbral CPU global", FormatPercent(GlobalCpuThreshold))
+                @ReadOnlyMetric("Memoria media sistema", FormatPercent(baseline.MemoryAverage))
+                @ReadOnlyMetric("Memoria desviación", FormatPercent(baseline.MemoryStdDev))
+                @ReadOnlyMetric("Memoria rango típico", $"{FormatPercent(baseline.MemoryMin)} a {FormatPercent(baseline.MemoryMax)}")
+                @ReadOnlyMetric("Umbral memoria global", FormatPercent(GlobalMemoryThreshold))
+                @ReadOnlyMetric("TCP medio sistema", FormatNullable(baseline.NetworkConnectionAverage))
+                @ReadOnlyMetric("Procesos habituales", Vm.ProcessBaselines.Count.ToString())
+                @ReadOnlyMetric("Umbral CPU por proceso", "Media proceso + N desviaciones")
+                @ReadOnlyMetric("Umbral memoria por proceso", "Media proceso + N desviaciones")
+                @ReadOnlyMetric("Umbral TCP por proceso", "Media proceso + N desviaciones")
+            </div>
+        }
+
+        <h2 class="subhead">Constantes metodológicas del experimento</h2>
+        <p class="muted">Estos valores no salen de la línea base: son criterios fijos definidos para la prueba. La línea base aporta medias y desviaciones; estas constantes indican cómo compararlas y durante cuánto tiempo sostener la condición.</p>
+        <div class="settings-grid">
+            @ReadOnlyMetric("Intervalo monitoreo", $"{Vm.Settings.MonitoringIntervalSeconds}s")
+            @ReadOnlyMetric("Aprendizaje configurado", $"{Vm.Settings.BaselineLearningMinutes} min")
+            @ReadOnlyMetric("Cobertura mínima de aprendizaje", $"{Vm.Settings.BaselineMinimumSampleCoveragePercent:N0}%")
+            @ReadOnlyMetric("Multiplicador estadístico", $"{Vm.Settings.StandardDeviationMultiplier:N2} desviaciones")
+            @ReadOnlyMetric("Mínimo CPU defensivo", FormatPercent(Vm.Settings.MinCpuThreshold))
+            @ReadOnlyMetric("CPU sostenida", $"{Vm.Settings.SustainedCpuSeconds}s")
+            @ReadOnlyMetric("Memoria sostenida", $"{Vm.Settings.SustainedMemorySeconds}s")
+            @ReadOnlyMetric("CPU absoluta laboratorio", FormatPercent(Vm.Settings.CpuAbsoluteThresholdPercent))
+            @ReadOnlyMetric("Memoria absoluta laboratorio", FormatMb(Vm.Settings.MemoryAbsoluteThresholdMb))
+        </div>
+
+        <h2 class="subhead">Reglas activas</h2>
+        <div class="toggle-grid readonly-rules">
+            @RuleBadge("CPU por proceso", Vm.Settings.EnableCpuRule)
+            @RuleBadge("Memoria por proceso", Vm.Settings.EnableMemoryRule)
+            @RuleBadge("Proceso nuevo", Vm.Settings.EnableNewProcessRule)
+            @RuleBadge("Ruta sospechosa", Vm.Settings.EnableSuspiciousPathRule)
+            @RuleBadge("Actividad periódica", Vm.Settings.EnablePeriodicActivityRule)
+            @RuleBadge("Correlación", Vm.Settings.EnableCorrelationRule)
+            @RuleBadge("CPU global", Vm.Settings.EnableGlobalCpuRule)
+            @RuleBadge("Memoria global", Vm.Settings.EnableGlobalMemoryRule)
+        </div>
+    </article>;
+
+    private RenderFragment Export() => @<article class="card">
+        <h2>Exportación CSV</h2>
+        <p>Exporta métricas del sistema, procesos, alertas, escenarios y resumen de evaluación.</p>
+        <p><strong>Ruta:</strong> Carpeta Descargas del usuario</p>
+        <p>@Vm.ExportStatus</p>
+        <div class="button-row">
+            <button type="button" data-agent-action="export" @onclick="Vm.ExportAsync">Exportar resultados</button>
+            <button type="button" class="secondary" data-agent-action="clear" @onclick="Vm.ClearExperimentDataAsync">Limpiar resultados</button>
+        </div>
+    </article>;
+
+    private IEnumerable<ProcessMetric> FilteredProcesses => SortProcesses(Vm.CurrentProcesses.Where(MatchesProcess));
+    private IEnumerable<Alert> FilteredAlerts => SortAlerts(Vm.Alerts.Where(MatchesAlert));
+    private IEnumerable<ProcessBaseline> FilteredBaselines => SortBaselines(Vm.ProcessBaselines.Where(MatchesBaseline));
+    private IEnumerable<ValidationScenario> FilteredScenarios => SortScenarios(Vm.ValidationScenarios.Where(MatchesScenario));
+    private double GlobalCpuThreshold => Vm.ActiveBaseline is null
+        ? 0
+        : Math.Max(Vm.Settings.MinCpuThreshold, Vm.ActiveBaseline.CpuAverage + Vm.Settings.StandardDeviationMultiplier * Math.Max(1, Vm.ActiveBaseline.CpuStdDev));
+    private double GlobalMemoryThreshold => Vm.ActiveBaseline is null
+        ? 0
+        : Vm.ActiveBaseline.MemoryAverage + Vm.Settings.StandardDeviationMultiplier * Math.Max(1, Vm.ActiveBaseline.MemoryStdDev);
+
+    private RenderFragment FilterInput(string key, string placeholder) => @<label class="field table-filter">
+        <span>Filtro</span>
+        <input type="search" value="@Interaction.GetFilter(key)" placeholder="@placeholder" data-agent-filter="@key" @oninput="eventArgs => SetFilter(key, eventArgs)" />
+    </label>;
+
+    private RenderFragment SelectFilter(string key, string label, IEnumerable<(string Value, string Text)> options) => @<label class="field table-filter compact-field">
+        <span>@label</span>
+        <select value="@Interaction.GetFilter(key)" data-agent-filter="@key" @onchange="eventArgs => SetFilter(key, eventArgs)">
+            @foreach (var option in options)
+            {
+                <option value="@option.Value">@option.Text</option>
+            }
+        </select>
+    </label>;
+
+    private RenderFragment ColumnToggle(string key, string label) => @<label class="column-toggle">
+        <input type="checkbox" checked="@Column(key)" data-agent-column="@key" @onchange="eventArgs => SetColumn(key, eventArgs)" />
+        <span>@label</span>
+    </label>;
+
+    private RenderFragment SortHeader(string table, string column, string label) => @<th>
+        <button type="button" class="sort-header" @onclick="() => Interaction.ToggleSort(table, column)">
+            <span>@label</span>
+            <span class="sort-indicator">@SortIndicator(table, column)</span>
+        </button>
+    </th>;
+
+    private RenderFragment ReadOnlyMetric(string label, string value) => @<div class="readonly-metric">
+        <span>@label</span>
+        <strong>@value</strong>
+    </div>;
+
+    private RenderFragment RuleBadge(string label, bool isEnabled) => @<div class="rule-line">
+        <span>@label</span>
+        <span class="badge @(isEnabled ? "ok" : "danger")">@(isEnabled ? "Activa" : "Inactiva")</span>
+    </div>;
+
+    private RenderFragment NumberInput(string key, string label, double value, Action<double> setValue) => @<label class="field">
+        <span>@label</span>
+        <input type="number" step="0.1" value="@value" data-agent-setting="@key" @onchange="eventArgs => SetNumber(eventArgs, setValue)" />
+    </label>;
+
+    private RenderFragment Toggle(string key, string label, bool value, Action<bool> setValue) => @<label class="toggle">
+        <input type="checkbox" checked="@value" data-agent-setting="@key" @onchange="eventArgs => SetBool(eventArgs, setValue)" />
+        <span>@label</span>
+    </label>;
+
+    private bool Column(string key) => Interaction.IsColumnVisible(key);
+
+    private string SortIndicator(string table, string column)
+    {
+        var state = Interaction.GetSortState(table);
+        if (!state.Column.Equals(column, StringComparison.OrdinalIgnoreCase))
+        {
+            return string.Empty;
+        }
+
+        return state.Ascending ? "↑" : "↓";
+    }
+
+    private IEnumerable<ProcessMetric> SortProcesses(IEnumerable<ProcessMetric> processes)
+    {
+        var sort = Interaction.GetSortState("processes");
+        return sort.Column switch
+        {
+            "pid" => SortBy(processes, process => process.ProcessId, sort.Ascending),
+            "name" => SortBy(processes, process => process.ProcessName, sort.Ascending),
+            "cpu" => SortBy(processes, process => process.CpuPercent, sort.Ascending),
+            "memory" => SortBy(processes, process => process.MemoryMb, sort.Ascending),
+            "life" => SortBy(processes, process => process.LifetimeSeconds ?? -1, sort.Ascending),
+            "network" => SortBy(processes, process => process.NetworkConnectionCount, sort.Ascending),
+            "known" => SortBy(processes, process => process.IsKnownProcess ? 1 : 0, sort.Ascending),
+            "time" => SortBy(processes, process => process.Timestamp, sort.Ascending),
+            "path" => SortBy(processes, process => process.ExecutablePath, sort.Ascending),
+            _ => processes
+        };
+    }
+
+    private IEnumerable<Alert> SortAlerts(IEnumerable<Alert> alerts)
+    {
+        var sort = Interaction.GetSortState("alerts");
+        return sort.Column switch
+        {
+            "date" => SortBy(alerts, alert => alert.Timestamp, sort.Ascending),
+            "severity" => SortBy(alerts, alert => SeverityRank(alert.Severity), sort.Ascending),
+            "type" => SortBy(alerts, alert => alert.AlertType, sort.Ascending),
+            "rule" => SortBy(alerts, alert => alert.RuleName, sort.Ascending),
+            "category" => SortBy(alerts, alert => RuleCategoryLabel(alert.RuleCategory), sort.Ascending),
+            "process" => SortBy(alerts, alert => alert.ProcessName, sort.Ascending),
+            "status" => SortBy(alerts, alert => alert.WasAcknowledged ? 1 : 0, sort.Ascending),
+            _ => alerts
+        };
+    }
+
+    private IEnumerable<ProcessBaseline> SortBaselines(IEnumerable<ProcessBaseline> baselines)
+    {
+        var sort = Interaction.GetSortState("baseline");
+        return sort.Column switch
+        {
+            "process" => SortBy(baselines, baseline => baseline.ProcessName, sort.Ascending),
+            "cpuAvg" => SortBy(baselines, baseline => baseline.AverageCpu, sort.Ascending),
+            "cpuDev" => SortBy(baselines, baseline => baseline.StdDevCpu, sort.Ascending),
+            "memoryAvg" => SortBy(baselines, baseline => baseline.AverageMemory, sort.Ascending),
+            "memoryDev" => SortBy(baselines, baseline => baseline.StdDevMemory, sort.Ascending),
+            "tcpAvg" => SortBy(baselines, baseline => baseline.AverageNetworkConnections, sort.Ascending),
+            "tcpDev" => SortBy(baselines, baseline => baseline.StdDevNetworkConnections, sort.Ascending),
+            "life" => SortBy(baselines, baseline => baseline.TypicalLifetimeSeconds, sort.Ascending),
+            "count" => SortBy(baselines, baseline => baseline.OccurrenceCount, sort.Ascending),
+            _ => baselines
+        };
+    }
+
+    private IEnumerable<ValidationScenario> SortScenarios(IEnumerable<ValidationScenario> scenarios)
+    {
+        var sort = Interaction.GetSortState("scenarios");
+        return sort.Column switch
+        {
+            "start" => SortBy(scenarios, scenario => scenario.StartedAt, sort.Ascending),
+            "end" => SortBy(scenarios, scenario => scenario.FinishedAt ?? DateTime.MinValue, sort.Ascending),
+            "name" => SortBy(scenarios, scenario => scenario.Name, sort.Ascending),
+            "category" => SortBy(scenarios, scenario => scenario.ScenarioCategory, sort.Ascending),
+            "description" => SortBy(scenarios, scenario => scenario.Description, sort.Ascending),
+            "process" => SortBy(scenarios, scenario => scenario.ProcessName, sort.Ascending),
+            "duration" => SortBy(scenarios, scenario => scenario.DurationSeconds ?? -1, sort.Ascending),
+            "expected" => SortBy(scenarios, scenario => scenario.ExpectedResult, sort.Ascending),
+            "actual" => SortBy(scenarios, scenario => scenario.ActualResult, sort.Ascending),
+            "classification" => SortBy(scenarios, scenario => scenario.ActualClassification, sort.Ascending),
+            "confusion" => SortBy(scenarios, scenario => scenario.ConfusionResult, sort.Ascending),
+            "alert" => SortBy(scenarios, scenario => scenario.AlertGenerated ? 1 : 0, sort.Ascending),
+            "time" => SortBy(scenarios, scenario => scenario.DetectionTimeSeconds ?? -1, sort.Ascending),
+            "notes" => SortBy(scenarios, scenario => scenario.Notes, sort.Ascending),
+            _ => scenarios
+        };
+    }
+
+    private static IEnumerable<T> SortBy<T, TKey>(IEnumerable<T> values, Func<T, TKey> keySelector, bool ascending)
+    {
+        return ascending ? values.OrderBy(keySelector) : values.OrderByDescending(keySelector);
+    }
+
+    private void SetFilter(string key, ChangeEventArgs eventArgs)
+    {
+        Interaction.SetFilter(key, Convert.ToString(eventArgs.Value) ?? string.Empty);
+    }
+
+    private void SetColumn(string key, ChangeEventArgs eventArgs)
+    {
+        if (eventArgs.Value is bool value)
+        {
+            Interaction.SetColumnVisible(key, value);
+        }
+    }
+
+    private bool MatchesProcess(ProcessMetric process)
+    {
+        var search = Interaction.GetFilter("process-search");
+        var known = Interaction.GetFilter("process-known");
+        var matchesKnown = known switch
+        {
+            "known" => process.IsKnownProcess,
+            "unknown" => !process.IsKnownProcess,
+            _ => true
+        };
+
+        return matchesKnown && MatchesSearch(search, process.ProcessId.ToString(), process.ProcessName, process.ExecutablePath);
+    }
+
+    private bool MatchesAlert(Alert alert)
+    {
+        var severity = Interaction.GetFilter("alert-severity");
+        var status = Interaction.GetFilter("alert-status");
+        var matchesSeverity = string.IsNullOrWhiteSpace(severity) || alert.Severity.Equals(severity, StringComparison.OrdinalIgnoreCase);
+        var matchesStatus = status switch
+        {
+            "pending" => !alert.WasAcknowledged,
+            "ack" => alert.WasAcknowledged,
+            _ => true
+        };
+
+        return matchesSeverity &&
+               matchesStatus &&
+               MatchesSearch(Interaction.GetFilter("alert-search"), alert.ProcessName, alert.AlertType, alert.RuleName, alert.RuleCategory, alert.Description);
+    }
+
+    private bool MatchesBaseline(ProcessBaseline baseline)
+    {
+        return MatchesSearch(Interaction.GetFilter("baseline-search"), baseline.ProcessName);
+    }
+
+    private bool MatchesScenario(ValidationScenario scenario)
+    {
+        return MatchesSearch(
+            Interaction.GetFilter("scenario-search"),
+            scenario.Name,
+            scenario.ScenarioType,
+            scenario.ScenarioCategory,
+            scenario.Description,
+            scenario.ProcessName,
+            scenario.ExpectedResult,
+            scenario.ActualResult,
+            scenario.ActualClassification,
+            scenario.ConfusionResult,
+            scenario.Notes);
+    }
+
+    private static bool MatchesSearch(string search, params string?[] values)
+    {
+        if (string.IsNullOrWhiteSpace(search))
+        {
+            return true;
+        }
+
+        return values.Any(value => !string.IsNullOrWhiteSpace(value) && value.Contains(search, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string AlertNumber(Alert alert, double? value)
+    {
+        if (value is not null)
+        {
+            return $"{value.Value:N2}";
+        }
+
+        return alert.ThresholdType switch
+        {
+            "Statistical" => "No disponible en la alerta registrada",
+            "Absolute" => "No aplica para una regla absoluta de laboratorio",
+            "Heuristic" => "No aplica: esta regla es heurística y no usa media/desviación",
+            "Correlation" => "No aplica: esta regla combina señales ya evaluadas",
+            _ => "No aplica"
+        };
+    }
+
+    private static string AlertEvidence(Alert alert)
+    {
+        if (!string.IsNullOrWhiteSpace(alert.EvidenceDetails))
+        {
+            return alert.EvidenceDetails;
+        }
+
+        return alert.ThresholdType switch
+        {
+            "Heuristic" => "La alerta fue registrada por una regla heurística. Revise métrica observada y referencia usada; las alertas antiguas pueden no tener evidencia técnica extendida.",
+            "Correlation" => "La alerta fue registrada por correlación de señales. Revise la referencia usada para ver qué señales coincidieron.",
+            _ => "La alerta no contiene evidencia técnica extendida. Genere una nueva prueba después de esta actualización para registrar el detalle completo."
+        };
+    }
+
+    private static string AlertMethodologyExplanation(Alert alert)
+    {
+        return alert.ThresholdType switch
+        {
+            "Statistical" => "Regla estadística: compara la medición actual contra la media y desviación estándar aprendidas en la línea base.",
+            "Absolute" => "Regla absoluta de laboratorio: usa un límite fijo para validar el prototipo en pruebas controladas.",
+            "Heuristic" => "Regla heurística: evalúa una señal observable que puede apoyarse en la línea base o en criterios de laboratorio, como periodicidad o ruta sospechosa.",
+            "Correlation" => "Regla de correlación: aumenta severidad cuando coinciden varias señales en el mismo proceso.",
+            _ => "Regla de detección local."
+        };
+    }
+
+    private static string ThresholdTypeLabel(string thresholdType)
+    {
+        return thresholdType switch
+        {
+            "Statistical" => "Estadística",
+            "Absolute" => "Absoluta de laboratorio",
+            "Heuristic" => "Heurística",
+            "Correlation" => "Correlación",
+            _ => "No disponible"
+        };
+    }
+
+    private static string RuleCategoryLabel(string category)
+    {
+        return category switch
+        {
+            "Cpu" => "CPU",
+            "Memory" => "Memoria",
+            "Network" => "Red",
+            "Persistence" => "Persistencia",
+            "SuspiciousPath" => "Ruta sospechosa",
+            "Correlation" => "Correlación",
+            _ => string.IsNullOrWhiteSpace(category) ? "No disponible" : category
+        };
+    }
+
+    private static void SetNumber(ChangeEventArgs eventArgs, Action<double> setValue)
+    {
+        if (double.TryParse(Convert.ToString(eventArgs.Value), out var value))
+        {
+            setValue(value);
+        }
+    }
+
+    private static void SetBool(ChangeEventArgs eventArgs, Action<bool> setValue)
+    {
+        if (eventArgs.Value is bool value)
+        {
+            setValue(value);
+        }
+    }
+
+    private async Task RefreshLoopAsync(CancellationToken cancellationToken)
+    {
+        if (_timer is null)
+        {
+            return;
+        }
+
+        try
+        {
+            while (await _timer.WaitForNextTickAsync(cancellationToken))
+            {
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private void OnViewModelChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        _ = InvokeAsync(StateHasChanged);
+    }
+
+    private void OnInteractionChanged()
+    {
+        _ = InvokeAsync(StateHasChanged);
+    }
+
+    private static string FormatPercent(double value) => $"{value:N2}%";
+    private static string ScenarioTelemetrySummary(ValidationScenario scenario)
+    {
+        return $"{scenario.TelemetrySampleCount} muestras | " +
+            $"CPU media/máx.: {scenario.AverageCpuPercent:N2}%/{scenario.MaximumCpuPercent:N2}% | " +
+            $"RAM media/máx.: {scenario.AverageMemoryMb:N1}/{scenario.MaximumMemoryMb:N1} MB | " +
+            $"TCP medio/máx.: {scenario.AverageNetworkConnections:N2}/{scenario.MaximumNetworkConnections:N0}" +
+            (string.IsNullOrWhiteSpace(scenario.TriggeredRuleName) ? string.Empty : $" | Regla: {scenario.TriggeredRuleName}");
+    }
+
+    private static string BaselineCoverageText(BaselineProfile baseline) =>
+        baseline.ExpectedSampleCount == 0 ? "No disponible" : $"{baseline.SampleCoveragePercent:N1}%";
+
+    private static string BaselineSampleCountText(BaselineProfile baseline) =>
+        baseline.ExpectedSampleCount == 0 ? "Línea base anterior a esta medición" : $"{baseline.SampleCount} de {baseline.ExpectedSampleCount} muestras";
+
+    private static string BaselineGapText(BaselineProfile baseline) =>
+        baseline.ExpectedSampleCount == 0 ? "No disponible" : $"{baseline.MaximumSampleGapSeconds:N1}s";
+
+    private static string FormatMb(double value) => $"{value:N1} MB";
+    private static string FormatSeconds(double? value) => value is null ? "N/D" : $"{value.Value:N0}s";
+    private static string FormatNullable(double? value) => value is null ? "N/D" : $"{value.Value:N2}";
+    private static string SeverityClass(string severity) => severity switch
+    {
+        var value when value.Equals("Alta", StringComparison.OrdinalIgnoreCase) => "danger",
+        var value when value.Equals("Media", StringComparison.OrdinalIgnoreCase) => "warn",
+        var value when value.Equals("Baja", StringComparison.OrdinalIgnoreCase) => "ok",
+        _ => "neutral"
+    };
+
+    private static string StatusClass(string status) => status switch
+    {
+        var value when value.Equals("Activo", StringComparison.OrdinalIgnoreCase) => "active",
+        var value when value.Equals("Aprendizaje", StringComparison.OrdinalIgnoreCase) => "learning",
+        _ => "inactive"
+    };
+
+    private static int SeverityRank(string severity) => severity switch
+    {
+        var value when value.Equals("Alta", StringComparison.OrdinalIgnoreCase) => 3,
+        var value when value.Equals("Media", StringComparison.OrdinalIgnoreCase) => 2,
+        var value when value.Equals("Baja", StringComparison.OrdinalIgnoreCase) => 1,
+        _ => 0
+    };
+
+    public void Dispose()
+    {
+        Vm.PropertyChanged -= OnViewModelChanged;
+        Interaction.Changed -= OnInteractionChanged;
+        _timerCancellation?.Cancel();
+        _timer?.Dispose();
+        _timerCancellation?.Dispose();
+    }
+}

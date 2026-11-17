@@ -1,0 +1,14 @@
+<Window x:Class="BotnetMiningDetector.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:blazor="clr-namespace:Microsoft.AspNetCore.Components.WebView.Wpf;assembly=Microsoft.AspNetCore.Components.WebView.Wpf"
+        Title="Agente local BYC"
+        Height="860"
+        Width="1320"
+        MinHeight="760"
+        MinWidth="1120"
+        Background="#F4F7FB">
+    <Grid>
+        <blazor:BlazorWebView x:Name="BlazorHost" HostPage="wwwroot/index.html" />
+    </Grid>
+</Window>

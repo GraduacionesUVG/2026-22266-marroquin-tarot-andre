@@ -1,0 +1,34 @@
+# Build outputs and generated .NET files
+**/bin/
+**/obj/
+artifacts/
+
+# IDE and local developer state
+.vs/
+.dotnet-home/
+.localappdata/
+.appdata/
+.idea/
+.vscode/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.env
+.env.local
+.env.*.local
+Thumbs.db
+
+# Local SQLite databases and sidecar files
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+agent_monitor.db
+
+# Local exports and laboratory copies
+**/Exports/
+**/LabSimulations/
+
+# Test output
+TestResults/
